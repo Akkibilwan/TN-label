@@ -84,7 +84,7 @@ def setup_openai():
                     st.warning("Please enter an OpenAI API key to continue.")
         if api_key:
             openai.api_key = api_key
-            return openai
+            return openai  # Return the module
     except Exception as e:
         st.error(f"Error setting up OpenAI API: {e}")
     return None
@@ -94,7 +94,7 @@ def encode_image(image_bytes):
     return base64.b64encode(image_bytes).decode('utf-8')
 
 # ---------- OpenAI Analysis & Classification Function ----------
-def analyze_and_classify_thumbnail(openai_client, image_bytes):
+def analyze_and_classify_thumbnail(image_bytes):
     base64_image = encode_image(image_bytes)
     prompt = f"""
 You are a professional YouTube thumbnail analyst.
@@ -115,7 +115,7 @@ Image data:
 data:image/jpeg;base64,{base64_image}
 """
     try:
-        response = openai_client.ChatCompletion.create(
+        response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=150
@@ -132,7 +132,6 @@ data:image/jpeg;base64,{base64_image}
             label = line.replace("Label:", "").strip()
         elif line.startswith("Reason:"):
             reason = line.replace("Reason:", "").strip()
-    # Ensure label is one of the defined categories
     valid_categories = {
         "Text-Dominant",
         "Minimalist / Clean",
@@ -147,7 +146,7 @@ data:image/jpeg;base64,{base64_image}
     return label, reason
 
 # ---------- Upload and Process Function ----------
-def upload_and_process(openai_client):
+def upload_and_process():
     st.header("Upload and Analyze Thumbnails")
     st.info("Upload up to 10 thumbnail images.")
     uploaded_files = st.file_uploader("Choose thumbnail images...", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
@@ -169,10 +168,9 @@ def upload_and_process(openai_client):
                 st.markdown('</div>', unsafe_allow_html=True)
                 
                 with st.spinner(f"Analyzing {uploaded_file.name}..."):
-                    label, reason = analyze_and_classify_thumbnail(openai_client, image_bytes)
+                    label, reason = analyze_and_classify_thumbnail(image_bytes)
                     st.markdown(f"**Category:** {label}")
                     st.markdown(f"**Reason:** {reason}")
-                    # Store the record
                     store_thumbnail_record(image_bytes, label, reason)
                     st.success(f"Processed and stored {uploaded_file.name}")
             except Exception as e:
@@ -189,7 +187,6 @@ def library_explorer():
     if "selected_label" not in st.session_state:
         st.session_state.selected_label = None
 
-    # If no category is selected, show all category buttons
     if st.session_state.selected_label is None:
         st.markdown("### Select a Category")
         cols = st.columns(4)
@@ -221,16 +218,16 @@ def main():
         '<h1 style="margin: 0; color: #f1f1f1;">Thumbnail Analyzer</h1></div>',
         unsafe_allow_html=True
     )
-    st.markdown('<p style="color: #aaaaaa; margin-top: 0;">Analyze thumbnails, label them with a category and a brief reason, and explore by category.</p>', unsafe_allow_html=True)
+    st.markdown('<p style="color: #aaaaaa; margin-top: 0;">Upload thumbnails to have them analyzed and categorized, and explore by category.</p>', unsafe_allow_html=True)
     
-    openai_client = setup_openai()
-    if not openai_client:
-        st.error("OpenAI client not initialized. Please check your API key.")
+    openai_api = setup_openai()
+    if not openai_api:
+        st.error("OpenAI API not initialized. Please check your API key.")
         return
 
     menu = st.sidebar.radio("Navigation", ["Upload Thumbnails", "Library Explorer"])
     if menu == "Upload Thumbnails":
-        upload_and_process(openai_client)
+        upload_and_process()
     elif menu == "Library Explorer":
         library_explorer()
 
