@@ -138,7 +138,8 @@ def encode_image(image_bytes):
 def analyze_and_classify_thumbnail(openai_client, image_bytes):
     base64_image = encode_image(image_bytes)
     prompt = f"""
-You are a professional YouTube thumbnail analyst. Analyze the following thumbnail image (provided as a base64 string) and provide a detailed description of its visual style, layout, and key elements. Then, based on your analysis, classify the thumbnail into exactly one of the following categories (choose only one):
+You are a professional YouTube thumbnail analyst. Analyze the following thumbnail image (provided as a base64 string) and provide a detailed description of its visual style, layout, and key elements.
+Then, based on your analysis, classify the thumbnail into exactly one of the following categories (choose only one):
 
 1. Text-Dominant: Large, bold typography takes up most of the space with minimal imagery.
 2. Minimalist / Clean: Simple background, limited color palette, clean font, and one key focal point.
@@ -148,15 +149,15 @@ You are a professional YouTube thumbnail analyst. Analyze the following thumbnai
 6. Branded: Consistent use of channel colors, fonts, and logos to build brand recognition.
 7. Curiosity Gap / Intrigue: Uses elements like blurring or arrows to spark curiosity.
 
-Provide your analysis in a structured format. In your final output, on a new line output exactly: 
+Provide your analysis in a structured format. In your final output, on a new line output exactly:
 Category: <Your Category>
 
 Here is the image:
 data:image/jpeg;base64,{base64_image}
     """
     try:
-        response = openai_client.ChatCompletion.create(
-            model="gpt-4",
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=300
         )
@@ -164,16 +165,25 @@ data:image/jpeg;base64,{base64_image}
     except Exception as e:
         st.error(f"Error from OpenAI: {e}")
         result = "Analysis not available.\nCategory: Uncategorized"
-    # Try to parse the category from the final line
+    # Parse the category from the final line
     lines = result.splitlines()
     category = None
     for line in reversed(lines):
         if line.startswith("Category:"):
             category = line.replace("Category:", "").strip()
             break
-    if not category:
+    # Ensure the category is one of the defined ones
+    valid_categories = {
+        "Text-Dominant",
+        "Minimalist / Clean",
+        "Face-Focused",
+        "Before & After",
+        "Collage / Multi-Image",
+        "Branded",
+        "Curiosity Gap / Intrigue"
+    }
+    if category not in valid_categories:
         category = "Uncategorized"
-    # Return the full analysis text and the parsed category.
     return result, category
 
 # ---------- Generic Prompt Template Generation ----------
@@ -206,12 +216,12 @@ def generate_prompt_template(label):
         "Curiosity Gap / Intrigue": (
             "Generate a YouTube thumbnail that uses visual cues like partial blurring, arrows, or intriguing elements to spark curiosity. "
             "The design should invite viewers to click to find out more."
+        ),
+        "Uncategorized": (
+            "Generate a YouTube thumbnail with a 16:9 aspect ratio that is engaging, vibrant, and aligned with current design trends."
         )
     }
-    default_prompt = (
-        "Generate a YouTube thumbnail with a 16:9 aspect ratio that is engaging, vibrant, and aligned with current design trends."
-    )
-    return templates.get(label, default_prompt)
+    return templates.get(label, templates["Uncategorized"])
 
 # ---------- Upload and Process Function ----------
 def upload_and_process(openai_client):
