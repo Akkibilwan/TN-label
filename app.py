@@ -1,128 +1,317 @@
 import streamlit as st
-from openai import OpenAI
-import base64
-import io
 import os
+import io
+import json
+import sqlite3
+import base64
+from datetime import datetime
+from PIL import Image
+import openai
 
-# --- Configuration ---
-# It's better to use environment variables or Streamlit secrets for API keys
-# For local testing, using text_input is okay, but less secure.
-# os.environ["OPENAI_API_KEY"] = "YOUR_API_KEY_HERE" # Or set it in your environment
+# Set page configuration
+st.set_page_config(
+    page_title="Thumbnail Analyzer & Generator",
+    page_icon="🎬",
+    layout="wide"
+)
 
-# --- Category Definitions (as provided by user, with additions) ---
-CATEGORY_DEFINITIONS = """
-* **Text-Dominant:** Large, bold typography is the main focus, covering a significant portion of the thumbnail. Minimal imagery or image is secondary. Goal: Grab attention with a compelling text hook.
-* **Minimalist / Clean:** Uncluttered impression, simple background, limited color palette, clean font, few elements, lots of negative space. Goal: Appear modern, professional.
-* **Face-Focused:** A close-up of a person's face showing clear emotion is the largest or most central element. Goal: Create human connection, convey emotion.
-* **Before & After:** Clearly divided layout (usually vertically) showing two distinct states of the same subject/scene side-by-side. Goal: Demonstrate transformation or results.
-* **Comparison / Versus:** Layout clearly structured (often split-screen) to visually place two or more competing items/ideas against each other. Goal: Highlight differences or choices.
-* **Collage / Multi-Image:** Composed of multiple distinct images arranged together (grid, overlapping etc.). Goal: Hint at variety of content within the video.
-* **Image-Focused:** A single, high-quality photograph, illustration, or graphic is the dominant element, carrying the visual appeal. Text is minimal/secondary. Goal: Impress with strong visuals.
-* **Branded:** The *most defining characteristic* is the consistent and prominent use of specific channel logos, color schemes, or unique font styles that make it instantly recognizable *primarily* due to branding elements. Goal: Build brand recognition.
-* **Curiosity Gap / Intrigue:** Deliberately obscures information using blurring, question marks, arrows pointing to something hidden, or incomplete visuals. Goal: Make the viewer click to find out more.
-* **Other / Unclear:** Does not fit well into any of the above categories or combines multiple styles without a single dominant one.
-"""
+# ---------- Custom CSS for Dark Mode & Styling ----------
+st.markdown("""
+<style>
+    .main {
+        background-color: #0f0f0f;
+        color: #f1f1f1;
+    }
+    .stApp {
+        background-color: #0f0f0f;
+    }
+    h1, h2, h3 {
+        color: #f1f1f1;
+        font-family: 'Roboto', sans-serif;
+    }
+    p, li, div {
+        color: #aaaaaa;
+    }
+    .stButton>button {
+        background-color: #ff0000;
+        color: white;
+        border: none;
+        border-radius: 2px;
+        padding: 8px 16px;
+        font-weight: 500;
+    }
+    .stTextInput>div>div>input, .stTextArea>div>div>textarea {
+        border-radius: 20px;
+        background-color: #121212;
+        color: #f1f1f1;
+        border: 1px solid #303030;
+    }
+    .thumbnail-container, .db-thumbnail-container {
+        border: 1px solid #303030;
+        border-radius: 8px;
+        padding: 10px;
+        background-color: #181818;
+        margin-bottom: 10px;
+    }
+    pre {
+        background-color: #121212 !important;
+    }
+    code {
+        color: #a9dc76 !important;
+    }
+    .label-button {
+        margin: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# --- OpenAI API Call Function ---
-def get_thumbnail_category(api_key: str, image_bytes: bytes) -> str:
-    """
-    Analyzes the thumbnail image using OpenAI multimodal model and returns the category.
+# ---------- SQLite Database Functions ----------
+
+DB_NAME = "thumbnails.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS thumbnails (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            image BLOB,
+            analysis TEXT,
+            label TEXT,
+            prompt_template TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def store_thumbnail_record(image_bytes, analysis, label, prompt_template):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO thumbnails (image, analysis, label, prompt_template)
+        VALUES (?, ?, ?, ?)
+    """, (image_bytes, analysis, label, prompt_template))
+    conn.commit()
+    conn.close()
+
+def get_labels():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT label FROM thumbnails")
+    labels = [row[0] for row in c.fetchall()]
+    conn.close()
+    return labels
+
+def get_records_by_label(label):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT id, image, analysis, prompt_template, created_at FROM thumbnails WHERE label=?", (label,))
+    records = c.fetchall()
+    conn.close()
+    return records
+
+# ---------- OpenAI API Credential Setup ----------
+
+def setup_openai():
+    openai_client = None
+    try:
+        api_key = None
+        if 'OPENAI_API_KEY' in st.secrets:
+            api_key = st.secrets["OPENAI_API_KEY"]
+        else:
+            api_key = os.environ.get('OPENAI_API_KEY')
+            if not api_key:
+                api_key = st.text_input("Enter your OpenAI API key:", type="password")
+                if not api_key:
+                    st.warning("Please enter an OpenAI API key to continue.")
+        if api_key:
+            openai.api_key = api_key
+            openai_client = openai
+    except Exception as e:
+        st.error(f"Error setting up OpenAI API: {e}")
+    return openai_client
+
+# ---------- Utility Function ----------
+def encode_image(image_bytes):
+    return base64.b64encode(image_bytes).decode('utf-8')
+
+# ---------- OpenAI Analysis & Classification Function ----------
+def analyze_and_classify_thumbnail(openai_client, image_bytes):
+    base64_image = encode_image(image_bytes)
+    prompt = f"""
+You are a professional YouTube thumbnail analyst. Analyze the following thumbnail image (provided as a base64 string) and provide a detailed description of its visual style, layout, and key elements. Then, based on your analysis, classify the thumbnail into exactly one of the following categories (choose only one):
+
+1. Text-Dominant: Large, bold typography takes up most of the space with minimal imagery.
+2. Minimalist / Clean: Simple background, limited color palette, clean font, and one key focal point.
+3. Face-Focused: A close-up of a person's face showing strong emotion.
+4. Before & After: A split view clearly showing two different states (e.g., transformation).
+5. Collage / Multi-Image: Multiple images combined to show variety or list content.
+6. Branded: Consistent use of channel colors, fonts, and logos to build brand recognition.
+7. Curiosity Gap / Intrigue: Uses elements like blurring or arrows to spark curiosity.
+
+Provide your analysis in a structured format. In your final output, on a new line output exactly: 
+Category: <Your Category>
+
+Here is the image:
+data:image/jpeg;base64,{base64_image}
     """
     try:
-        client = OpenAI(api_key=api_key)
-
-        # Encode image to Base64
-        base64_image = base64.b64encode(image_bytes).decode('utf-8')
-        image_data_uri = f"data:image/jpeg;base64,{base64_image}" # Assuming jpeg, adjust if needed
-
-        prompt_messages = [
-            {
-                "role": "system",
-                "content": "You are an expert visual analyst specializing in YouTube thumbnail styles. Your task is to analyze the provided thumbnail image and classify it into ONE of the following visual style/layout categories based on its most dominant features. Respond with only the single category name and nothing else."
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Please classify the following thumbnail into one category based on these definitions:\n\n{CATEGORY_DEFINITIONS}\n\nRespond with only the single category name."
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                           "url": image_data_uri
-                        }
-                    }
-                ]
-            }
-        ]
-
-        # Use the appropriate multimodal model name (check OpenAI documentation for the latest)
-        # Common options include "gpt-4-vision-preview", "gpt-4o", or newer versions.
-        # Using "gpt-4o" as a likely candidate for strong vision capabilities.
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=prompt_messages,
-            max_tokens=50 # Keep response short, just the category name
+        response = openai_client.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300
         )
-
-        category = response.choices[0].message.content.strip()
-        # Basic validation to ensure it's one of the expected categories (optional but good)
-        defined_categories = [
-            "Text-Dominant", "Minimalist / Clean", "Face-Focused",
-            "Before & After", "Comparison / Versus", "Collage / Multi-Image",
-            "Image-Focused", "Branded", "Curiosity Gap / Intrigue", "Other / Unclear"
-            ]
-        # Simple check if the response *contains* a known category name
-        found_category = "Other / Unclear" # Default
-        for defined_cat in defined_categories:
-            if defined_cat.lower() in category.lower():
-                 # Return the official category name for consistency
-                found_category = defined_cat
-                break
-        return found_category
-
+        result = response.choices[0].message.content.strip()
     except Exception as e:
-        st.error(f"An error occurred while contacting OpenAI: {e}")
-        return "Error during analysis"
+        st.error(f"Error from OpenAI: {e}")
+        result = "Analysis not available.\nCategory: Uncategorized"
+    # Try to parse the category from the final line
+    lines = result.splitlines()
+    category = None
+    for line in reversed(lines):
+        if line.startswith("Category:"):
+            category = line.replace("Category:", "").strip()
+            break
+    if not category:
+        category = "Uncategorized"
+    # Return the full analysis text and the parsed category.
+    return result, category
 
-# --- Streamlit App Layout ---
-st.set_page_config(layout="wide")
-st.title("🖼️ Thumbnail Visual Style Categorizer (using OpenAI)")
-st.markdown("Upload a thumbnail image, and OpenAI will categorize its visual style based on predefined definitions.")
+# ---------- Generic Prompt Template Generation ----------
+def generate_prompt_template(label):
+    templates = {
+        "Text-Dominant": (
+            "Generate a YouTube thumbnail that emphasizes large, bold typography and a compelling text hook. "
+            "Keep imagery minimal so that the text stands out and grabs attention."
+        ),
+        "Minimalist / Clean": (
+            "Generate a YouTube thumbnail with a simple background and limited color palette. "
+            "Focus on one clear focal point and clean typography for a modern, professional look."
+        ),
+        "Face-Focused": (
+            "Generate a YouTube thumbnail featuring a close-up of a person’s face showing strong emotion. "
+            "Ensure the facial expression is engaging and the overall design creates a human connection."
+        ),
+        "Before & After": (
+            "Generate a YouTube thumbnail that clearly shows a transformation through a split-view design. "
+            "Highlight the contrast between the before and after states to emphasize change."
+        ),
+        "Collage / Multi-Image": (
+            "Generate a YouTube thumbnail that combines multiple images to showcase variety or a list of items. "
+            "Balance the images well to avoid clutter while hinting at diverse content."
+        ),
+        "Branded": (
+            "Generate a YouTube thumbnail that uses consistent channel colors, fonts, and logo placement to build brand recognition. "
+            "The design should be cohesive and easily identifiable as part of a brand."
+        ),
+        "Curiosity Gap / Intrigue": (
+            "Generate a YouTube thumbnail that uses visual cues like partial blurring, arrows, or intriguing elements to spark curiosity. "
+            "The design should invite viewers to click to find out more."
+        )
+    }
+    default_prompt = (
+        "Generate a YouTube thumbnail with a 16:9 aspect ratio that is engaging, vibrant, and aligned with current design trends."
+    )
+    return templates.get(label, default_prompt)
 
-st.sidebar.header("Settings")
-api_key = st.sidebar.text_input("Enter your OpenAI API Key", type="password")
+# ---------- Upload and Process Function ----------
+def upload_and_process(openai_client):
+    st.header("Upload and Analyze Thumbnails")
+    st.info("Upload up to 10 thumbnail images at once.")
 
-st.sidebar.markdown("---")
-st.sidebar.header("Category Definitions")
-st.sidebar.markdown(CATEGORY_DEFINITIONS.replace("*","").replace("\n\n","\n").replace(":","**:\n")) # Format for sidebar display
+    uploaded_files = st.file_uploader("Choose thumbnail images...", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+    
+    if uploaded_files:
+        if len(uploaded_files) > 10:
+            st.error("Please upload a maximum of 10 images at once.")
+            return
+        
+        for uploaded_file in uploaded_files:
+            try:
+                image = Image.open(uploaded_file)
+                img_byte_arr = io.BytesIO()
+                image.save(img_byte_arr, format=image.format if image.format else 'JPEG')
+                image_bytes = img_byte_arr.getvalue()
 
-uploaded_file = st.file_uploader("Choose a thumbnail image...", type=["jpg", "jpeg", "png"])
+                st.markdown('<div class="thumbnail-container">', unsafe_allow_html=True)
+                st.image(image, caption=f"Uploaded: {uploaded_file.name}", use_column_width=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                with st.spinner(f"Analyzing {uploaded_file.name}..."):
+                    analysis_text, category = analyze_and_classify_thumbnail(openai_client, image_bytes)
+                    prompt_template = generate_prompt_template(category)
+                    
+                    st.markdown(f"**Category:** {category}")
+                    st.markdown("**Generic Prompt Template:**")
+                    st.text_area("", value=prompt_template, height=80, key=f"upload_prompt_{uploaded_file.name}")
+                    
+                    # Store the record in the SQLite database
+                    store_thumbnail_record(image_bytes, analysis_text, category, prompt_template)
+                    st.success(f"Processed and stored {uploaded_file.name}")
+            except Exception as e:
+                st.error(f"Error processing {uploaded_file.name}: {e}")
 
-if uploaded_file is not None:
-    # Display the uploaded image
-    image = io.BytesIO(uploaded_file.getvalue())
-    st.image(image, caption=f"Uploaded Thumbnail: {uploaded_file.name}", width=300)
+# ---------- Library Explorer ----------
+def library_explorer():
+    st.header("Thumbnail Library Explorer")
+    labels = get_labels()
+    if not labels:
+        st.info("No thumbnails have been processed yet.")
+        return
 
-    if api_key:
-        st.markdown("---")
-        st.subheader("Analysis Result")
-        with st.spinner("🧠 Analyzing thumbnail with OpenAI..."):
-            # Read image bytes for API call
-            image_bytes_for_api = uploaded_file.getvalue()
-            category_result = get_thumbnail_category(api_key, image_bytes_for_api)
+    if "selected_label" not in st.session_state:
+        st.session_state.selected_label = None
 
-            if "Error" not in category_result:
-                st.success(f"Predicted Category: **{category_result}**")
-            else:
-                st.error(category_result) # Display the error message from the function
+    # Show label buttons if none is selected
+    if st.session_state.selected_label is None:
+        st.markdown("### Select a Category to Explore")
+        cols = st.columns(4)
+        for idx, label in enumerate(labels):
+            with cols[idx % 4]:
+                if st.button(label, key=f"btn_{label}"):
+                    st.session_state.selected_label = label
+    else:
+        st.markdown(f"### Thumbnails for Category: **{st.session_state.selected_label}**")
+        records = get_records_by_label(st.session_state.selected_label)
+        if records:
+            for rec in records:
+                rec_id, image_blob, analysis, prompt_template, created_at = rec
+                image = Image.open(io.BytesIO(image_blob))
+                with st.expander(f"Thumbnail ID: {rec_id} (Uploaded on: {created_at})"):
+                    st.image(image, caption=f"Category: {st.session_state.selected_label}", use_column_width=True)
+                    st.markdown("**Analysis Data:**")
+                    st.code(analysis, language="json", key=f"analysis_{rec_id}")
+                    st.markdown("**Generic Prompt Template:**")
+                    st.text_area("", value=prompt_template, height=80, key=f"prompt_{rec_id}")
+        else:
+            st.info("No thumbnails found for this category.")
+        if st.button("Back to Categories", key="back_button"):
+            st.session_state.selected_label = None
 
-    elif not api_key:
-        st.warning("Please enter your OpenAI API Key in the sidebar to enable analysis.")
+# ---------- Main App ----------
+def main():
+    init_db()
+    
+    st.markdown(
+        '<div style="display: flex; align-items: center; padding: 10px 0;">'
+        '<span style="color: #FF0000; font-size: 28px; font-weight: bold; margin-right: 5px;">▶️</span>'
+        '<h1 style="margin: 0; color: #f1f1f1;">Thumbnail Analyzer & Generator</h1></div>',
+        unsafe_allow_html=True
+    )
+    st.markdown('<p style="color: #aaaaaa; margin-top: 0;">Analyze and label your thumbnail library using OpenAI</p>', unsafe_allow_html=True)
+    
+    openai_client = setup_openai()
+    if not openai_client:
+        st.error("OpenAI client not initialized. Please check your API key.")
+        return
 
-else:
-    st.info("Upload a thumbnail image to begin.")
+    menu = st.sidebar.radio("Navigation", ["Upload Thumbnails", "Library Explorer"])
+    
+    if menu == "Upload Thumbnails":
+        upload_and_process(openai_client)
+    elif menu == "Library Explorer":
+        library_explorer()
 
-st.markdown("---")
-st.caption("Note: Analysis relies on OpenAI's multimodal understanding. Ensure you are using an appropriate model like GPT-4o or GPT-4V. Accuracy depends on the model's interpretation and the clarity of category definitions.")
+if __name__ == "__main__":
+    main()
