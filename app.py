@@ -66,7 +66,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------- SQLite Database Functions ----------
-
 DB_NAME = "thumbnails.db"
 
 def init_db():
@@ -112,7 +111,6 @@ def get_records_by_label(label):
     return records
 
 # ---------- OpenAI API Credential Setup ----------
-
 def setup_openai():
     openai_client = None
     try:
@@ -235,7 +233,7 @@ def upload_and_process(openai_client):
                 image_bytes = img_byte_arr.getvalue()
 
                 st.markdown('<div class="thumbnail-container">', unsafe_allow_html=True)
-                st.image(image, caption=f"Uploaded: {uploaded_file.name}", use_column_width=True)
+                st.image(image, caption=f"Uploaded: {uploaded_file.name}", use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
                 
                 with st.spinner(f"Analyzing {uploaded_file.name}..."):
@@ -244,7 +242,7 @@ def upload_and_process(openai_client):
                     
                     st.markdown(f"**Category:** {category}")
                     st.markdown("**Generic Prompt Template:**")
-                    st.text_area("", value=prompt_template, height=80, key=f"upload_prompt_{uploaded_file.name}")
+                    st.text_area("Template", value=prompt_template, height=80, key=f"upload_prompt_{uploaded_file.name}", label_visibility="collapsed")
                     
                     # Store the record in the SQLite database
                     store_thumbnail_record(image_bytes, analysis_text, category, prompt_template)
@@ -279,11 +277,11 @@ def library_explorer():
                 rec_id, image_blob, analysis, prompt_template, created_at = rec
                 image = Image.open(io.BytesIO(image_blob))
                 with st.expander(f"Thumbnail ID: {rec_id} (Uploaded on: {created_at})"):
-                    st.image(image, caption=f"Category: {st.session_state.selected_label}", use_column_width=True)
+                    st.image(image, caption=f"Category: {st.session_state.selected_label}", use_container_width=True)
                     st.markdown("**Analysis Data:**")
-                    st.code(analysis, language="json", key=f"analysis_{rec_id}")
+                    st.code(analysis, language="json")
                     st.markdown("**Generic Prompt Template:**")
-                    st.text_area("", value=prompt_template, height=80, key=f"prompt_{rec_id}")
+                    st.text_area("Template", value=prompt_template, height=80, key=f"prompt_{rec_id}", label_visibility="collapsed")
         else:
             st.info("No thumbnails found for this category.")
         if st.button("Back to Categories", key="back_button"):
