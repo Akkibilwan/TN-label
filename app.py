@@ -77,20 +77,19 @@ def init_db():
             image BLOB,
             analysis TEXT,
             label TEXT,
-            prompt_template TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
     conn.close()
 
-def store_thumbnail_record(image_bytes, analysis, label, prompt_template):
+def store_thumbnail_record(image_bytes, analysis, label):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("""
-        INSERT INTO thumbnails (image, analysis, label, prompt_template)
-        VALUES (?, ?, ?, ?)
-    """, (image_bytes, analysis, label, prompt_template))
+        INSERT INTO thumbnails (image, analysis, label)
+        VALUES (?, ?, ?)
+    """, (image_bytes, analysis, label))
     conn.commit()
     conn.close()
 
@@ -105,7 +104,7 @@ def get_labels():
 def get_records_by_label(label):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT id, image, analysis, prompt_template, created_at FROM thumbnails WHERE label=?", (label,))
+    c.execute("SELECT id, image, analysis, created_at FROM thumbnails WHERE label=?", (label,))
     records = c.fetchall()
     conn.close()
     return records
@@ -149,7 +148,7 @@ Then, based on your analysis, classify the thumbnail into exactly one of the fol
 6. Branded: Consistent use of channel colors, fonts, and logos to build brand recognition.
 7. Curiosity Gap / Intrigue: Uses elements like blurring or arrows to spark curiosity.
 
-Provide your analysis in a structured format. In your final output, on a new line output exactly:
+Provide your analysis in a structured format and then on a new line output exactly:
 Category: <Your Category>
 
 Here is the image:
@@ -186,43 +185,6 @@ data:image/jpeg;base64,{base64_image}
         category = "Uncategorized"
     return result, category
 
-# ---------- Generic Prompt Template Generation ----------
-def generate_prompt_template(label):
-    templates = {
-        "Text-Dominant": (
-            "Generate a YouTube thumbnail that emphasizes large, bold typography and a compelling text hook. "
-            "Keep imagery minimal so that the text stands out and grabs attention."
-        ),
-        "Minimalist / Clean": (
-            "Generate a YouTube thumbnail with a simple background and limited color palette. "
-            "Focus on one clear focal point and clean typography for a modern, professional look."
-        ),
-        "Face-Focused": (
-            "Generate a YouTube thumbnail featuring a close-up of a person’s face showing strong emotion. "
-            "Ensure the facial expression is engaging and the overall design creates a human connection."
-        ),
-        "Before & After": (
-            "Generate a YouTube thumbnail that clearly shows a transformation through a split-view design. "
-            "Highlight the contrast between the before and after states to emphasize change."
-        ),
-        "Collage / Multi-Image": (
-            "Generate a YouTube thumbnail that combines multiple images to showcase variety or a list of items. "
-            "Balance the images well to avoid clutter while hinting at diverse content."
-        ),
-        "Branded": (
-            "Generate a YouTube thumbnail that uses consistent channel colors, fonts, and logo placement to build brand recognition. "
-            "The design should be cohesive and easily identifiable as part of a brand."
-        ),
-        "Curiosity Gap / Intrigue": (
-            "Generate a YouTube thumbnail that uses visual cues like partial blurring, arrows, or intriguing elements to spark curiosity. "
-            "The design should invite viewers to click to find out more."
-        ),
-        "Uncategorized": (
-            "Generate a YouTube thumbnail with a 16:9 aspect ratio that is engaging, vibrant, and aligned with current design trends."
-        )
-    }
-    return templates.get(label, templates["Uncategorized"])
-
 # ---------- Upload and Process Function ----------
 def upload_and_process(openai_client):
     st.header("Upload and Analyze Thumbnails")
@@ -248,14 +210,12 @@ def upload_and_process(openai_client):
                 
                 with st.spinner(f"Analyzing {uploaded_file.name}..."):
                     analysis_text, category = analyze_and_classify_thumbnail(openai_client, image_bytes)
-                    prompt_template = generate_prompt_template(category)
                     
                     st.markdown(f"**Category:** {category}")
-                    st.markdown("**Generic Prompt Template:**")
-                    st.text_area("Template", value=prompt_template, height=80, key=f"upload_prompt_{uploaded_file.name}", label_visibility="collapsed")
+                    st.text_area("Analysis", value=analysis_text, height=150, key=f"analysis_{uploaded_file.name}", label_visibility="collapsed")
                     
-                    # Store the record in the SQLite database
-                    store_thumbnail_record(image_bytes, analysis_text, category, prompt_template)
+                    # Store the record (no prompt template needed)
+                    store_thumbnail_record(image_bytes, analysis_text, category)
                     st.success(f"Processed and stored {uploaded_file.name}")
             except Exception as e:
                 st.error(f"Error processing {uploaded_file.name}: {e}")
@@ -271,7 +231,7 @@ def library_explorer():
     if "selected_label" not in st.session_state:
         st.session_state.selected_label = None
 
-    # Show label buttons if none is selected
+    # Show label buttons if no label is selected
     if st.session_state.selected_label is None:
         st.markdown("### Select a Category to Explore")
         cols = st.columns(4)
@@ -284,14 +244,12 @@ def library_explorer():
         records = get_records_by_label(st.session_state.selected_label)
         if records:
             for rec in records:
-                rec_id, image_blob, analysis, prompt_template, created_at = rec
+                rec_id, image_blob, analysis, created_at = rec
                 image = Image.open(io.BytesIO(image_blob))
                 with st.expander(f"Thumbnail ID: {rec_id} (Uploaded on: {created_at})"):
                     st.image(image, caption=f"Category: {st.session_state.selected_label}", use_container_width=True)
-                    st.markdown("**Analysis Data:**")
-                    st.code(analysis, language="json")
-                    st.markdown("**Generic Prompt Template:**")
-                    st.text_area("Template", value=prompt_template, height=80, key=f"prompt_{rec_id}", label_visibility="collapsed")
+                    st.markdown("**Analysis (Reasoning):**")
+                    st.code(analysis, language="text")
         else:
             st.info("No thumbnails found for this category.")
         if st.button("Back to Categories", key="back_button"):
