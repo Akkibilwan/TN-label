@@ -1,6 +1,6 @@
 streamlit
-openai>=1.0.0
 google-cloud-vision
+google-auth
+openai
 Pillow
 requests
-python-dotenv
