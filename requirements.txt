@@ -1,0 +1,6 @@
+streamlit
+openai
+google-cloud-vision
+Pillow
+requests
+python-dotenv
