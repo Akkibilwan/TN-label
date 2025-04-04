@@ -45,13 +45,11 @@ def save_analysis_to_db(video_id, source, openai_description, vision_result, fin
     ))
     conn.commit()
 
-# Main Streamlit app
+# Streamlit UI
 st.title("🎬 YouTube Thumbnail Analyzer with AI & SQLite")
 
-# Setup API clients
+# Google Vision Setup
 vision_client = None
-openai_client = None
-
 if 'GOOGLE_CREDENTIALS' in st.secrets:
     credentials_dict = st.secrets["GOOGLE_CREDENTIALS"]
     if isinstance(credentials_dict, str):
@@ -59,8 +57,9 @@ if 'GOOGLE_CREDENTIALS' in st.secrets:
     credentials = service_account.Credentials.from_service_account_info(credentials_dict)
     vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
+# OpenAI setup (v1.x syntax)
 openai.api_key = st.secrets.get("OPENAI_API_KEY")
-openai_client = openai
+openai_client = openai.OpenAI(api_key=openai.api_key)
 
 # Choose input method
 input_option = st.radio("Select input method:", ["Upload Image", "YouTube URL"], horizontal=True)
@@ -96,38 +95,45 @@ else:
 if image_bytes and image:
     st.image(image, caption=video_info["title"], use_column_width=True)
 
-    # Analyze image with OpenAI Vision (basic simulation)
+    # Analyze image with OpenAI (v1.x)
     base64_img = base64.b64encode(image_bytes).decode("utf-8")
-    openai_desc = openai_client.ChatCompletion.create(
+    openai_desc = openai_client.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {"role": "user", "content": [
-                {"type": "text", "text": "Describe this thumbnail in detail."},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-            ]}
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this thumbnail in detail."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+                ]
+            }
         ]
-    )["choices"][0]["message"]["content"]
+    ).choices[0].message.content
 
-    # Analyze with Vision API
+    # Google Vision Analysis
     vision_result = {}
     if vision_client:
         image_v = vision.Image(content=image_bytes)
         label_response = vision_client.label_detection(image=image_v)
         vision_result["labels"] = [label.description for label in label_response.label_annotations]
 
-    # Generate summary analysis
-    messages = [
-        {"role": "system", "content": "You're a thumbnail analysis expert."},
-        {"role": "user", "content": f"Analyze this thumbnail based on Vision AI: {json.dumps(vision_result)} and your description: {openai_desc}"}
-    ]
-    final_analysis = openai_client.ChatCompletion.create(model="gpt-4o", messages=messages)["choices"][0]["message"]["content"]
+    # Generate structured analysis
+    final_analysis = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You're a thumbnail analysis expert."},
+            {"role": "user", "content": f"Analyze this thumbnail based on Vision AI: {json.dumps(vision_result)} and OpenAI vision description: {openai_desc}"}
+        ]
+    ).choices[0].message.content
 
-    # Generate prompt paragraph
-    prompt_message = [
-        {"role": "system", "content": "You're an AI prompt designer."},
-        {"role": "user", "content": f"Create a detailed prompt to recreate this thumbnail based on: {final_analysis}"}
-    ]
-    final_prompt = openai_client.ChatCompletion.create(model="gpt-4o", messages=prompt_message)["choices"][0]["message"]["content"]
+    # Generate detailed prompt
+    final_prompt = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You're a creative prompt engineer."},
+            {"role": "user", "content": f"Write a detailed DALL-E prompt to recreate this thumbnail: {final_analysis}"}
+        ]
+    ).choices[0].message.content
 
     st.subheader("🧠 Final Analysis")
     st.markdown(final_analysis)
@@ -135,7 +141,7 @@ if image_bytes and image:
     st.subheader("🖊️ Prompt to Recreate Thumbnail")
     st.text_area("Prompt", final_prompt, height=150)
 
-    # Save everything to SQLite
+    # Save analysis
     save_analysis_to_db(
         video_id=video_info.get("id", "uploaded_image"),
         source=input_option,
@@ -145,7 +151,7 @@ if image_bytes and image:
         final_prompt=final_prompt
     )
 
-# View Past Analyses
+# History tab
 with st.expander("📜 View Past Analyses"):
     cursor.execute("SELECT timestamp, video_id, source, final_prompt FROM thumbnail_analysis ORDER BY id DESC LIMIT 10")
     rows = cursor.fetchall()
