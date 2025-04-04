@@ -6,7 +6,6 @@ import re
 import requests
 import sqlite3
 import base64
-import time
 from datetime import datetime
 from PIL import Image
 from google.cloud import vision
@@ -77,6 +76,9 @@ st.markdown("""
     }
     code {
         color: #a9dc76 !important;
+    }
+    .label-button {
+        margin: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -241,11 +243,11 @@ def analyze_with_openai(openai_client, base64_image):
         st.error(f"Error analyzing image with OpenAI: {e}")
         return "Unable to analyze the image."
 
-# ---------- Thumbnail Classification & Prompt Generation ----------
+# ---------- Thumbnail Classification & Generic Prompt Generation ----------
 
 def classify_thumbnail(openai_client, vision_results, openai_desc):
     """
-    Combine the vision results and the OpenAI description, then ask OpenAI
+    Combine the vision results and OpenAI description, then ask OpenAI
     to label the thumbnail into one of the popular categories.
     """
     try:
@@ -258,7 +260,7 @@ def classify_thumbnail(openai_client, vision_results, openai_desc):
         {json.dumps(analysis_data, indent=2)}
         
         Classify the thumbnail into one of these popular categories:
-        Gaming, Tutorial, Vlog, Review, DIY, Lifestyle, Cooking, Fitness, Comedy, Tech.
+        Face Close-up, Text-heavy, Split-screen, Reaction shot, Chart/Graph, Before-After, Cinematic Frame.
         Provide only the category name.
         """
         response = openai_client.ChatCompletion.create(
@@ -274,22 +276,89 @@ def classify_thumbnail(openai_client, vision_results, openai_desc):
 
 def generate_prompt_template(label):
     """
-    Generate a prompt template for creating a similar thumbnail for the given label.
+    Generate a generic prompt template (at the label level) for creating similar thumbnails.
+    You can modify these templates as needed.
     """
-    prompt_template = (
-        f"Create a hyper-realistic YouTube thumbnail for a {label} video with a 16:9 aspect ratio. "
-        "Incorporate vibrant colors, clear focal points, and design elements that are popular among "
-        f"{label} thumbnails. The image should be professional, eye-catching, and optimized for high engagement."
+    templates = {
+        "Face Close-up": (
+            "Generate a YouTube thumbnail that emphasizes a close-up of a person's face. "
+            "Focus on clear facial expressions, vibrant colors, and an engaging background suitable for high-impact content."
+        ),
+        "Text-heavy": (
+            "Generate a YouTube thumbnail dominated by bold and clear text elements. "
+            "Incorporate contrasting colors and a dynamic layout to ensure the text stands out."
+        ),
+        "Split-screen": (
+            "Generate a YouTube thumbnail using a split-screen layout that showcases two contrasting scenes or ideas. "
+            "Balance the visuals to create an eye-catching and informative design."
+        ),
+        "Reaction shot": (
+            "Generate a YouTube thumbnail featuring a reaction shot with expressive emotions. "
+            "Highlight facial expressions and use dramatic lighting to capture the moment."
+        ),
+        "Chart/Graph": (
+            "Generate a YouTube thumbnail that incorporates a chart or graph element. "
+            "Design the thumbnail to be clean, modern, and informative, perfect for educational or analytical content."
+        ),
+        "Before-After": (
+            "Generate a YouTube thumbnail that visually contrasts a before-and-after scenario. "
+            "Utilize side-by-side comparisons and clear visual cues to emphasize transformation."
+        ),
+        "Cinematic Frame": (
+            "Generate a YouTube thumbnail with a cinematic look, using dramatic lighting, composition, and color grading "
+            "to evoke emotion and tell a compelling story."
+        )
+    }
+    default_prompt = (
+        "Generate a YouTube thumbnail with a 16:9 aspect ratio that is engaging, vibrant, and aligned with current design trends."
     )
-    return prompt_template
+    return templates.get(label, default_prompt)
 
-# ---------- Main App Functions ----------
+# ---------- Library Explorer UI Functions ----------
+
+def library_explorer():
+    st.header("Thumbnail Library Explorer")
+    labels = get_labels()
+    if not labels:
+        st.info("No thumbnails have been processed yet.")
+        return
+
+    # Check if a label has been selected in session state.
+    if "selected_label" not in st.session_state:
+        st.session_state.selected_label = None
+
+    # If no label is selected, show label buttons.
+    if st.session_state.selected_label is None:
+        st.markdown("### Select a Category to Explore")
+        cols = st.columns(4)
+        for idx, label in enumerate(labels):
+            with cols[idx % 4]:
+                if st.button(label, key=f"btn_{label}"):
+                    st.session_state.selected_label = label
+    else:
+        st.markdown(f"### Thumbnails for category: **{st.session_state.selected_label}**")
+        records = get_records_by_label(st.session_state.selected_label)
+        if records:
+            for rec in records:
+                rec_id, image_blob, analysis, prompt_template, created_at = rec
+                image = Image.open(io.BytesIO(image_blob))
+                with st.expander(f"Thumbnail ID: {rec_id} (Uploaded on: {created_at})"):
+                    st.image(image, caption=f"Category: {st.session_state.selected_label}", use_column_width=True)
+                    st.markdown("**Analysis Data:**")
+                    st.code(analysis, language="json", key=f"analysis_{rec_id}")
+                    st.markdown("**Generic Prompt Template:**")
+                    st.text_area("", value=prompt_template, height=80, key=f"prompt_{rec_id}")
+        else:
+            st.info("No thumbnails found for this category.")
+        if st.button("Back to Categories", key="back_button"):
+            st.session_state.selected_label = None
+
+# ---------- Upload and Process Functions ----------
 
 def upload_and_process(vision_client, openai_client):
     st.header("Upload and Analyze Thumbnails")
     st.info("Upload up to 10 thumbnail images at once.")
 
-    # Allow multiple file uploads
     uploaded_files = st.file_uploader("Choose thumbnail images...", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
     
     if uploaded_files:
@@ -315,15 +384,14 @@ def upload_and_process(vision_client, openai_client):
                     if vision_client:
                         vision_results = analyze_with_vision(image_bytes, vision_client)
                     
-                    # Classify the thumbnail using the combined analysis
+                    # Classify the thumbnail using the combined analysis data
                     label = classify_thumbnail(openai_client, vision_results, openai_desc)
                     prompt_template = generate_prompt_template(label)
                     
                     st.markdown(f"**Category:** {label}")
-                    st.markdown("**Prompt Template:**")
-                    st.text_area("", value=prompt_template, height=80)
+                    st.markdown("**Generic Prompt Template:**")
+                    st.text_area("", value=prompt_template, height=80, key=f"upload_prompt_{uploaded_file.name}")
                     
-                    # Combine analysis details for storage
                     analysis_details = {
                         "openai_description": openai_desc,
                         "vision_analysis": vision_results if vision_results else "No Vision Data"
@@ -333,47 +401,24 @@ def upload_and_process(vision_client, openai_client):
             except Exception as e:
                 st.error(f"Error processing {uploaded_file.name}: {e}")
 
-def library_explorer():
-    st.header("Thumbnail Library Explorer")
-    labels = get_labels()
-    if not labels:
-        st.info("No thumbnails have been processed yet.")
-        return
-    
-    label_choice = st.selectbox("Select a category to explore", labels)
-    records = get_records_by_label(label_choice)
-    
-    if records:
-        st.markdown(f"### Thumbnails for category: **{label_choice}**")
-        for rec in records:
-            rec_id, image_blob, analysis, prompt_template, created_at = rec
-            image = Image.open(io.BytesIO(image_blob))
-            with st.expander(f"Thumbnail ID: {rec_id} (Uploaded on: {created_at})"):
-                st.image(image, caption=f"Category: {label_choice}", use_column_width=True)
-                st.markdown("**Analysis Data:**")
-                st.code(analysis, language="json")
-                st.markdown("**Prompt Template:**")
-                st.text_area("", value=prompt_template, height=80)
-    else:
-        st.info("No thumbnails found for this category.")
+# ---------- Main App ----------
 
 def main():
-    # Initialize the SQLite database
     init_db()
     
-    # App header
-    st.markdown('<div style="display: flex; align-items: center; padding: 10px 0;">'
-                '<span style="color: #FF0000; font-size: 28px; font-weight: bold; margin-right: 5px;">▶️</span>'
-                '<h1 style="margin: 0; color: #f1f1f1;">YouTube Thumbnail Analyzer & Generator</h1></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="display: flex; align-items: center; padding: 10px 0;">'
+        '<span style="color: #FF0000; font-size: 28px; font-weight: bold; margin-right: 5px;">▶️</span>'
+        '<h1 style="margin: 0; color: #f1f1f1;">YouTube Thumbnail Analyzer & Generator</h1></div>',
+        unsafe_allow_html=True
+    )
     st.markdown('<p style="color: #aaaaaa; margin-top: 0;">Analyze, label, and explore your thumbnail library</p>', unsafe_allow_html=True)
     
-    # Setup credentials
     vision_client, openai_client = setup_credentials()
     if not openai_client:
         st.error("OpenAI client not initialized. Please check your API key.")
         return
 
-    # Sidebar navigation
     menu = st.sidebar.radio("Navigation", ["Upload Thumbnails", "Library Explorer"])
     
     if menu == "Upload Thumbnails":
