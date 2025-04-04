@@ -24,16 +24,17 @@ CREATE TABLE IF NOT EXISTS thumbnail_analysis (
     openai_description TEXT,
     vision_result TEXT,
     final_analysis TEXT,
-    final_prompt TEXT
+    final_prompt TEXT,
+    categories TEXT
 );
 """)
 conn.commit()
 
-def save_analysis_to_db(video_id, source, openai_description, vision_result, final_analysis, final_prompt):
+def save_analysis_to_db(video_id, source, openai_description, vision_result, final_analysis, final_prompt, categories):
     timestamp = datetime.now().isoformat()
     cursor.execute("""
-        INSERT INTO thumbnail_analysis (timestamp, video_id, source, openai_description, vision_result, final_analysis, final_prompt)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO thumbnail_analysis (timestamp, video_id, source, openai_description, vision_result, final_analysis, final_prompt, categories)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         timestamp,
         video_id,
@@ -41,7 +42,8 @@ def save_analysis_to_db(video_id, source, openai_description, vision_result, fin
         openai_description,
         json.dumps(vision_result) if vision_result else None,
         final_analysis,
-        final_prompt
+        final_prompt,
+        ", ".join(categories)
     ))
     conn.commit()
 
@@ -135,27 +137,63 @@ if image_bytes and image:
         ]
     ).choices[0].message.content
 
+    # Categorize thumbnail
+    category_response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You're an expert in categorizing YouTube thumbnails."},
+            {"role": "user", "content": f"From the following analysis, return 3 high-level thumbnail categories this image fits into: {final_analysis}. Only return a JSON list of 3 category names."}
+        ]
+    ).choices[0].message.content
+
+    try:
+        categories = json.loads(category_response)
+    except:
+        categories = ["Uncategorized"]
+
     st.subheader("🧠 Final Analysis")
     st.markdown(final_analysis)
+
+    st.subheader("🏷️ Categories")
+    st.write(categories)
 
     st.subheader("🖊️ Prompt to Recreate Thumbnail")
     st.text_area("Prompt", final_prompt, height=150)
 
-    # Save analysis
     save_analysis_to_db(
         video_id=video_info.get("id", "uploaded_image"),
         source=input_option,
         openai_description=openai_desc,
         vision_result=vision_result,
         final_analysis=final_analysis,
-        final_prompt=final_prompt
+        final_prompt=final_prompt,
+        categories=categories
     )
 
 # History tab
 with st.expander("📜 View Past Analyses"):
-    cursor.execute("SELECT timestamp, video_id, source, final_prompt FROM thumbnail_analysis ORDER BY id DESC LIMIT 10")
+    cursor.execute("SELECT timestamp, video_id, source, final_prompt, categories FROM thumbnail_analysis ORDER BY id DESC LIMIT 10")
     rows = cursor.fetchall()
     for row in rows:
         st.markdown(f"**Date**: {row[0]}  |  **Video ID**: {row[1]}  |  **Source**: {row[2]}")
+        st.markdown(f"**Categories**: {row[4]}")
         st.markdown(f"**Prompt**: {row[3][:200]}...")
         st.markdown("---")
+
+# Browse by Category
+with st.expander("🗂️ Browse by Category"):
+    cursor.execute("SELECT DISTINCT categories FROM thumbnail_analysis")
+    all_categories = sorted(set(
+        cat.strip()
+        for row in cursor.fetchall()
+        for cat in row[0].split(',') if cat.strip()
+    ))
+
+    selected_category = st.selectbox("Select a category", all_categories)
+    if selected_category:
+        cursor.execute("SELECT timestamp, video_id, final_prompt FROM thumbnail_analysis WHERE categories LIKE ? ORDER BY id DESC", (f"%{selected_category}%",))
+        filtered = cursor.fetchall()
+        for f in filtered:
+            st.markdown(f"**{f[0]}** | **Video ID**: {f[1]}")
+            st.markdown(f"Prompt: {f[2][:200]}...")
+            st.markdown("---")
